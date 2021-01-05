@@ -16,6 +16,7 @@ package kafka
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"emperror.dev/errors"
@@ -32,11 +33,13 @@ import (
 	properties "github.com/banzaicloud/kafka-operator/properties/pkg"
 )
 
-func (r *Reconciler) getConfigProperties(bConfig *v1beta1.BrokerConfig, id int32, extListenerStatuses, intListenerStatuses, controllerIntListenerStatuses map[string]v1beta1.ListenerStatusList, serverPass, clientPass string, superUsers []string, log logr.Logger) *properties.Properties {
+func (r *Reconciler) getConfigProperties(bConfig *v1beta1.BrokerConfig, id int32,
+	extListenerStatuses, intListenerStatuses, controllerIntListenerStatuses map[string]v1beta1.ListenerStatusList,
+	serverPass, clientPass string, superUsers []string, log logr.Logger) *properties.Properties {
 	config := properties.NewProperties()
 
 	// Add listener configuration
-	listenerConf := generateListenerSpecificConfig(&r.KafkaCluster.Spec.ListenersConfig, log)
+	listenerConf := generateListenerSpecificConfig(&r.KafkaCluster.Spec.ListenersConfig, log, id, extListenerStatuses)
 	config.Merge(listenerConf)
 
 	// Add listener configuration
@@ -138,7 +141,9 @@ func generateSuperUsers(users []string) (suStrings []string) {
 	return
 }
 
-func (r *Reconciler) configMap(id int32, brokerConfig *v1beta1.BrokerConfig, extListenerStatuses, intListenerStatuses, controllerIntListenerStatuses map[string]v1beta1.ListenerStatusList, serverPass, clientPass string, superUsers []string, log logr.Logger) *corev1.ConfigMap {
+func (r *Reconciler) configMap(id int32, brokerConfig *v1beta1.BrokerConfig, extListenerStatuses,
+	intListenerStatuses, controllerIntListenerStatuses map[string]v1beta1.ListenerStatusList,
+	serverPass, clientPass string, superUsers []string, log logr.Logger) *corev1.ConfigMap {
 	brokerConf := &corev1.ConfigMap{
 		ObjectMeta: templates.ObjectMeta(
 			fmt.Sprintf(brokerConfigTemplate+"-%d", r.KafkaCluster.Name, id),
@@ -148,7 +153,8 @@ func (r *Reconciler) configMap(id int32, brokerConfig *v1beta1.BrokerConfig, ext
 			),
 			r.KafkaCluster,
 		),
-		Data: map[string]string{kafka.ConfigPropertyName: r.generateBrokerConfig(id, brokerConfig, extListenerStatuses, intListenerStatuses, controllerIntListenerStatuses, serverPass, clientPass, superUsers, log)},
+		Data: map[string]string{kafka.ConfigPropertyName: r.generateBrokerConfig(id, brokerConfig, extListenerStatuses,
+			intListenerStatuses, controllerIntListenerStatuses, serverPass, clientPass, superUsers, log)},
 	}
 	if brokerConfig.Log4jConfig != "" {
 		brokerConf.Data["log4j.properties"] = brokerConfig.Log4jConfig
@@ -167,16 +173,20 @@ func generateAdvertisedListenerConfig(id int32, l v1beta1.ListenersConfig,
 	return advertisedListenerConfig
 }
 
-func appendListenerConfigs(advertisedListenerConfig []string, id int32, listenerStatusList map[string]v1beta1.ListenerStatusList) []string {
-	for iListenerName, statuses := range listenerStatusList {
+func appendListenerConfigs(advertisedListenerConfig []string, id int32,
+	listenerStatusList map[string]v1beta1.ListenerStatusList) []string {
+
+	for listenerName, statuses := range listenerStatusList {
 		for _, status := range statuses {
 			if status.Name == fmt.Sprintf("broker-%d", id) {
 				advertisedListenerConfig = append(advertisedListenerConfig,
-					fmt.Sprintf("%s://%s", strings.ToUpper(iListenerName), status.Address))
+					fmt.Sprintf("%s://%s", strings.ToUpper(listenerName), status.Address))
 				break
 			}
 		}
 	}
+	//TODO write something about why we need to sort this
+	sort.Strings(advertisedListenerConfig)
 	return advertisedListenerConfig
 }
 
@@ -200,7 +210,8 @@ func generateControlPlaneListener(iListeners []v1beta1.InternalListenerConfig) s
 	return controlPlaneListener
 }
 
-func generateListenerSpecificConfig(l *v1beta1.ListenersConfig, log logr.Logger) *properties.Properties {
+func generateListenerSpecificConfig(l *v1beta1.ListenersConfig, log logr.Logger, id int32,
+	extListenerStatuses map[string]v1beta1.ListenerStatusList) *properties.Properties {
 
 	var interBrokerListenerName string
 	var securityProtocolMapConfig []string
@@ -240,16 +251,18 @@ func generateListenerSpecificConfig(l *v1beta1.ListenersConfig, log logr.Logger)
 	return config
 }
 
-func getInternalListener(iListeners []v1beta1.InternalListenerConfig, id int32, domain, namespace, crName string, headlessServiceEnabled bool) string {
+func getInternalListener(iListeners []v1beta1.InternalListenerConfig, id int32,
+	domain, namespace, crName string, headlessServiceEnabled bool) string {
 
-	internalListener := ""
-
+	var internalListener string
 	for _, iListener := range iListeners {
 		if iListener.UsedForInnerBrokerCommunication {
 			if headlessServiceEnabled {
-				internalListener = fmt.Sprintf("%s://%s-%d.%s-headless.%s.svc.%s:%d", strings.ToUpper(iListener.Name), crName, id, crName, namespace, domain, iListener.ContainerPort)
+				internalListener = fmt.Sprintf("%s://%s-%d.%s-headless.%s.svc.%s:%d",
+					strings.ToUpper(iListener.Name), crName, id, crName, namespace, domain, iListener.ContainerPort)
 			} else {
-				internalListener = fmt.Sprintf("%s://%s-%d.%s.svc.%s:%d", strings.ToUpper(iListener.Name), crName, id, namespace, domain, iListener.ContainerPort)
+				internalListener = fmt.Sprintf("%s://%s-%d.%s.svc.%s:%d",
+					strings.ToUpper(iListener.Name), crName, id, namespace, domain, iListener.ContainerPort)
 			}
 		}
 	}
@@ -257,7 +270,9 @@ func getInternalListener(iListeners []v1beta1.InternalListenerConfig, id int32, 
 	return internalListener
 }
 
-func (r Reconciler) generateBrokerConfig(id int32, brokerConfig *v1beta1.BrokerConfig, extListenerStatuses, intListenerStatuses, controllerIntListenerStatuses map[string]v1beta1.ListenerStatusList, serverPass, clientPass string, superUsers []string, log logr.Logger) string {
+func (r Reconciler) generateBrokerConfig(id int32, brokerConfig *v1beta1.BrokerConfig, extListenerStatuses,
+	intListenerStatuses, controllerIntListenerStatuses map[string]v1beta1.ListenerStatusList,
+	serverPass, clientPass string, superUsers []string, log logr.Logger) string {
 	// Parse cluster-wide readonly configuration
 	finalBrokerConfig, err := properties.NewFromString(r.KafkaCluster.Spec.ReadOnlyConfig)
 	if err != nil {
